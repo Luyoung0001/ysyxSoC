@@ -40,60 +40,159 @@ module sdram_top_axi(
   output [12:0] sdram_a,
   output [ 1:0] sdram_ba,
   output [ 1:0] sdram_dqm,
-  inout  [15:0] sdram_dq
+  output        sdram_en,
+  output [15:0] sdram_data_o,
+  input  [15:0] sdram_data_i
 );
+  import "DPI-C" function longint mem_read(input int unsigned raddr, input int unsigned size);
+  import "DPI-C" function void mem_write(input int unsigned waddr, input int unsigned mask, input int unsigned wdata);
 
-  wire sdram_dout_en;
-  wire [15:0] sdram_dout;
-  assign sdram_dq = sdram_dout_en ? sdram_dout : 16'bz;
-  sdram_axi #(
-    .SDRAM_MHZ(100),
-    .SDRAM_ADDR_W(24),
-    .SDRAM_COL_W(9),
-    .SDRAM_READ_LATENCY(2)
-  ) u_sdram_axi(
-    .clk_i(clock),
-    .rst_i(reset),
-    .inport_awvalid_i(in_awvalid),
-    .inport_awaddr_i(in_awaddr),
-    .inport_awid_i(in_awid),
-    .inport_awlen_i(in_awlen),
-    .inport_awburst_i(in_awburst),
-    .inport_wvalid_i(in_wvalid),
-    .inport_wdata_i(in_wdata),
-    .inport_wstrb_i(in_wstrb),
-    .inport_wlast_i(in_wlast),
-    .inport_bready_i(in_bready),
-    .inport_arvalid_i(in_arvalid),
-    .inport_araddr_i(in_araddr),
-    .inport_arid_i(in_arid),
-    .inport_arlen_i(in_arlen),
-    .inport_arburst_i(in_arburst),
-    .inport_rready_i(in_rready),
+  reg        aw_active_q;
+  reg [31:0] aw_addr_q;
+  reg [3:0]  aw_id_q;
+  reg [7:0]  aw_beats_left_q;
+  reg [2:0]  aw_size_q;
+  reg [1:0]  aw_burst_q;
 
-    .inport_awready_o(in_awready),
-    .inport_wready_o(in_wready),
-    .inport_bvalid_o(in_bvalid),
-    .inport_bresp_o(in_bresp),
-    .inport_bid_o(in_bid),
-    .inport_arready_o(in_arready),
-    .inport_rvalid_o(in_rvalid),
-    .inport_rdata_o(in_rdata),
-    .inport_rresp_o(in_rresp),
-    .inport_rid_o(in_rid),
-    .inport_rlast_o(in_rlast),
-    .sdram_clk_o(sdram_clk),
-    .sdram_cke_o(sdram_cke),
-    .sdram_cs_o(sdram_cs),
-    .sdram_ras_o(sdram_ras),
-    .sdram_cas_o(sdram_cas),
-    .sdram_we_o(sdram_we),
-    .sdram_dqm_o(sdram_dqm),
-    .sdram_addr_o(sdram_a),
-    .sdram_ba_o(sdram_ba),
-    .sdram_data_input_i(sdram_dq),
-    .sdram_data_output_o(sdram_dout),
-    .sdram_data_out_en_o(sdram_dout_en)
-  );
+  reg        bvalid_q;
+  reg [3:0]  bid_q;
 
+  reg        ar_active_q;
+  reg [31:0] ar_addr_q;
+  reg [3:0]  ar_id_q;
+  reg [7:0]  ar_beats_left_q;
+  reg [2:0]  ar_size_q;
+  reg [1:0]  ar_burst_q;
+
+  reg        rvalid_q;
+  reg [3:0]  rid_q;
+  reg [31:0] rdata_q;
+  reg        rlast_q;
+
+  wire aw_fire = in_awready & in_awvalid;
+  wire w_fire = in_wready & in_wvalid;
+  wire b_fire = in_bvalid & in_bready;
+  wire ar_fire = in_arready & in_arvalid;
+  wire r_fire = in_rvalid & in_rready;
+
+  function [31:0] next_addr;
+    input [31:0] addr;
+    input [2:0]  size;
+    input [1:0]  burst;
+    begin
+      if (burst == 2'b01) begin
+        next_addr = addr + (32'd1 << size);
+      end else begin
+        next_addr = addr;
+      end
+    end
+  endfunction
+
+  assign in_awready = ~aw_active_q & ~bvalid_q;
+  assign in_wready = aw_active_q;
+  assign in_arready = ~rvalid_q;
+
+  assign in_bvalid = bvalid_q;
+  assign in_bid = bid_q;
+  assign in_bresp = 2'b00;
+
+  assign in_rvalid = rvalid_q;
+  assign in_rid = rid_q;
+  assign in_rdata = rdata_q;
+  assign in_rresp = 2'b00;
+  assign in_rlast = rlast_q;
+
+  assign sdram_clk = clock;
+  assign sdram_cke = 1'b1;
+  assign sdram_cs = 1'b1;
+  assign sdram_ras = 1'b1;
+  assign sdram_cas = 1'b1;
+  assign sdram_we = 1'b1;
+  assign sdram_a = 13'h0;
+  assign sdram_ba = 2'b00;
+  assign sdram_dqm = 2'b00;
+  assign sdram_en = 1'b0;
+  assign sdram_data_o = 16'h0;
+
+  always @(posedge clock) begin
+    if (reset) begin
+      aw_active_q <= 1'b0;
+      aw_addr_q <= 32'h0;
+      aw_id_q <= 4'h0;
+      aw_beats_left_q <= 8'h0;
+      aw_size_q <= 3'h0;
+      aw_burst_q <= 2'b01;
+      bvalid_q <= 1'b0;
+      bid_q <= 4'h0;
+      ar_active_q <= 1'b0;
+      ar_addr_q <= 32'h0;
+      ar_id_q <= 4'h0;
+      ar_beats_left_q <= 8'h0;
+      ar_size_q <= 3'h0;
+      ar_burst_q <= 2'b01;
+      rvalid_q <= 1'b0;
+      rid_q <= 4'h0;
+      rdata_q <= 32'h0;
+      rlast_q <= 1'b0;
+    end else begin
+      if (aw_fire) begin
+        aw_active_q <= 1'b1;
+        aw_addr_q <= in_awaddr;
+        aw_id_q <= in_awid;
+        aw_beats_left_q <= in_awlen;
+        aw_size_q <= in_awsize;
+        aw_burst_q <= in_awburst;
+      end
+
+      if (w_fire) begin
+        mem_write(aw_addr_q, {28'h0, in_wstrb}, in_wdata);
+        if (aw_beats_left_q == 8'h0 || in_wlast) begin
+          aw_active_q <= 1'b0;
+          bvalid_q <= 1'b1;
+          bid_q <= aw_id_q;
+        end else begin
+          aw_beats_left_q <= aw_beats_left_q - 8'h1;
+          aw_addr_q <= next_addr(aw_addr_q, aw_size_q, aw_burst_q);
+        end
+      end
+
+      if (b_fire) begin
+        bvalid_q <= 1'b0;
+      end
+
+      if (ar_fire) begin
+        longint read_data;
+        read_data = mem_read(in_araddr, {29'h0, in_arsize});
+        ar_active_q <= 1'b1;
+        ar_addr_q <= in_araddr;
+        ar_id_q <= in_arid;
+        ar_beats_left_q <= in_arlen;
+        ar_size_q <= in_arsize;
+        ar_burst_q <= in_arburst;
+        rvalid_q <= 1'b1;
+        rid_q <= in_arid;
+        rdata_q <= read_data[31:0];
+        rlast_q <= (in_arlen == 8'h0);
+      end
+
+      if (r_fire) begin
+        if (ar_beats_left_q == 8'h0) begin
+          ar_active_q <= 1'b0;
+          rvalid_q <= 1'b0;
+          rlast_q <= 1'b0;
+        end else begin
+          longint read_data_next;
+          reg [31:0] addr_next;
+          addr_next = next_addr(ar_addr_q, ar_size_q, ar_burst_q);
+          read_data_next = mem_read(addr_next, {29'h0, ar_size_q});
+          ar_addr_q <= addr_next;
+          ar_beats_left_q <= ar_beats_left_q - 8'h1;
+          rid_q <= ar_id_q;
+          rdata_q <= read_data_next[31:0];
+          rlast_q <= (ar_beats_left_q == 8'h1);
+          rvalid_q <= 1'b1;
+        end
+      end
+    end
+  end
 endmodule
