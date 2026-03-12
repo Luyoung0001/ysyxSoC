@@ -78,7 +78,10 @@ class ysyxSoCASIC(implicit p: Parameters) extends LazyModule {
   val lcrc      = LazyModule(new APB4CRC     (AddrSpace(0x10301000, 0x20)))
 
   // memory
-  val sdramAddressSet = AddrSpace(0x80000000L, 0x2000000)
+  val sdramAddressSet =
+    AddrSpace(0x80000000L, 0x2000000) ++ // execution region
+    AddrSpace(0x90000000L, 0x2000000) ++ // uncached copy alias for bootloader stores
+    AddrSpace(0x20000000L, 0x100000)     // boot ROM alias used by CL3 BOOT_ADDR in SoC mode
   val lsdram_apb = if (!Config.sdramUseAXI) Some(LazyModule(new APBSDRAM (sdramAddressSet))) else None
   val lsdram_axi = if ( Config.sdramUseAXI) Some(LazyModule(new AXI4SDRAM(sdramAddressSet))) else None
 
